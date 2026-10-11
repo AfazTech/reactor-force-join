@@ -1,0 +1,43 @@
+{
+    "name": "afaztech/reactor-force-join",
+    "description": "Force-join (mandatory channel subscription) middleware for Reactor bots.",
+    "type": "reactor-package",
+    "license": "MIT",
+    "keywords": [
+        "afaztech",
+        "reactor",
+        "telegram",
+        "telegram-bot",
+        "force-join",
+        "mandatory-channel"
+    ],
+    "authors": [
+        {
+            "name": "Abolfazl Majidi (Afaz)",
+            "email": "contact@afaz.me",
+            "homepage": "https://afaz.me"
+        }
+    ],
+    "require": {
+        "php": ">=8.1",
+        "afaztech/reactor-framework": "^0.5.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "AfazTech\\ReactorJoin\\": "src/"
+        }
+    },
+    "extra": {
+        "branch-alias": {
+            "dev-main": "0.1.x-dev"
+        },
+        "reactor": {
+            "providers": [
+                "AfazTech\\ReactorJoin\\JoinServiceProvider"
+            ],
+            "migrations_namespace": "AfazTech\\ReactorJoin\\Migrations"
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
