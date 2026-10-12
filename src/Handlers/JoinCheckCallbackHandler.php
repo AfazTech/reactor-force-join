@@ -18,16 +18,13 @@ use Reactor\Core\EventDispatcher;
 /**
  * Handles the "I've joined" button from the force-join prompt.
  *
- * The middleware exempts callbacks whose data starts with "join:", so
- * this handler is guaranteed to reach the pipeline even when the user
- * is still blocked.
+ * On success the prompt is edited into a short confirmation message
+ * with a "main menu" button that triggers the app's `menu` callback,
+ * so the user lands back on the main menu without having to resend
+ * /start.
  *
- * JoinManager::missingChannels() re-checks every active channel. For
- * channels already marked as joined in the database the stored value
- * is trusted; for the others a fresh getChatMember call is issued to
- * catch the case where the user just joined and Telegram's chat_member
- * update has not been delivered yet. The result of that check is
- * persisted, so subsequent messages need no API call.
+ * On still-missing the prompt is re-rendered with the updated set of
+ * channels and a toast is shown.
  */
 #[Callback(data: 'join:check', priority: 200)]
 #[OnUpdate('callback_query')]
@@ -71,19 +68,37 @@ class JoinCheckCallbackHandler extends BaseHandler
     {
         $this->dispatcher->dispatch(Events::JOIN_PASSED, $userId);
 
+        $successText = $this->language->get($this->config->getSuccessKey(), $lang);
+
+        // Toast with the same message so the user gets immediate
+        // feedback even if the message edit fails.
         if ($callbackId !== '') {
-            $this->client->answerCallbackQuery(
-                $callbackId,
-                $this->language->get($this->config->getSuccessKey(), $lang)
-            );
+            $this->client->answerCallbackQuery($callbackId, $successText);
         }
 
-        if (is_int($chatId) && is_int($messageId)) {
-            try {
-                $this->client->deleteMessage($chatId, $messageId);
-            } catch (\Throwable $e) {
-                $this->logger->debug('Could not delete join prompt', ['error' => $e->getMessage()]);
-            }
+        if (!is_int($chatId) || !is_int($messageId)) {
+            return;
+        }
+
+        $keyboard = [
+            'inline_keyboard' => [[
+                [
+                    'text'          => '🏠 ' . $this->language->get($this->config->getOpenMenuButtonKey(), $lang),
+                    'callback_data' => 'menu',
+                ],
+            ]],
+        ];
+
+        try {
+            $this->client->editMessageText(
+                chatId: $chatId,
+                messageId: $messageId,
+                text: $successText,
+                keyboard: $keyboard,
+                parseMode: 'HTML',
+            );
+        } catch (\Throwable $e) {
+            $this->logger->debug('Could not update join prompt', ['error' => $e->getMessage()]);
         }
     }
 
@@ -113,7 +128,13 @@ class JoinCheckCallbackHandler extends BaseHandler
         $keyboard = $this->buildKeyboard($missing, $lang);
 
         try {
-            $this->client->editMessageText($chatId, $messageId, $text, $keyboard);
+            $this->client->editMessageText(
+                chatId: $chatId,
+                messageId: $messageId,
+                text: $text,
+                keyboard: $keyboard,
+                parseMode: 'HTML',
+            );
         } catch (\Throwable $e) {
             $this->logger->debug('Could not update join prompt', ['error' => $e->getMessage()]);
         }

@@ -24,6 +24,7 @@ final class JoinConfig
     private string $checkButtonKey = 'join_check_button';
     private string $successKey = 'join_success';
     private string $stillMissingKey = 'join_still_missing';
+    private string $openMenuButtonKey = 'join_open_menu';
 
     /** @var array<int, string> */
     private array $exemptCommands = ['/start', '/help'];
@@ -57,6 +58,12 @@ final class JoinConfig
     public function stillMissingKey(string $key): self
     {
         $this->stillMissingKey = $key;
+        return $this;
+    }
+
+    public function openMenuButtonKey(string $key): self
+    {
+        $this->openMenuButtonKey = $key;
         return $this;
     }
 
@@ -111,6 +118,11 @@ final class JoinConfig
     public function getStillMissingKey(): string
     {
         return $this->stillMissingKey;
+    }
+
+    public function getOpenMenuButtonKey(): string
+    {
+        return $this->openMenuButtonKey;
     }
 
     /** @return array<int, string> */

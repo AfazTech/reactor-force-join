@@ -26,11 +26,9 @@ use Reactor\Enums\MiddlewareMode;
  * skips users that have not yet picked a language so that the
  * language selection flow can complete first.
  *
- * Membership state is read from the local channel_members table, which
- * is kept in sync by ChatMemberSyncMiddleware using Telegram's own
- * chat_member push updates. No in-memory cache is involved; the
- * database is the single source of truth and JoinManager falls back to
- * the Bot API only when a record is missing or marked as "not joined".
+ * The join check is fail-open: any error raised while talking to the
+ * persistence layer is logged and the update is allowed to continue,
+ * so a misconfigured install cannot silently swallow every message.
  */
 #[Middleware(priority: 30, mode: MiddlewareMode::GLOBAL)]
 #[OnUpdate('message,callback_query')]
@@ -77,12 +75,31 @@ class ForceJoinMiddleware implements MiddlewareInterface
             return false;
         }
 
-        $channels = $this->joinManager->listActiveChannels();
+        // Fail-open: never let a persistence problem lock the user
+        // out of the bot.
+        try {
+            $channels = $this->joinManager->listActiveChannels();
+        } catch (\Throwable $e) {
+            $this->logger->error('Force-join: listActiveChannels failed, allowing update', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return false;
+        }
+
         if ($channels === []) {
             return false;
         }
 
-        $missing = $this->joinManager->missingChannels($userId);
+        try {
+            $missing = $this->joinManager->missingChannels($userId);
+        } catch (\Throwable $e) {
+            $this->logger->error('Force-join: missingChannels failed, allowing update', [
+                'user_id' => $userId,
+                'error'   => $e->getMessage(),
+            ]);
+            return false;
+        }
 
         if ($missing === []) {
             $this->dispatcher->dispatch(Events::JOIN_PASSED, $userId);
@@ -135,7 +152,14 @@ class ForceJoinMiddleware implements MiddlewareInterface
         $keyboard = $this->buildKeyboard($missing, $lang);
 
         try {
-            $this->client->sendMessage($chatId, $text, $keyboard)->await();
+            // parse_mode=HTML so tags like <b> in the message key are
+            // rendered instead of being displayed verbatim.
+            $this->client->sendMessage(
+                chatId: $chatId,
+                text: $text,
+                keyboard: $keyboard,
+                parseMode: 'HTML',
+            )->await();
         } catch (\Throwable $e) {
             $this->logger->warning('Failed to send force-join prompt', [
                 'user_id' => $userId,
