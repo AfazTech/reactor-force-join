@@ -71,19 +71,7 @@ class JoinManager implements JoinManagerInterface
 
         $this->assertBotIsAdmin($chatId, $title);
 
-        $link = (string) ($options['link'] ?? '');
-        if ($link === '') {
-            if (!empty($chat['username'])) {
-                $link = 'https://t.me/' . $chat['username'];
-            } elseif (!empty($options['invite_link'])) {
-                $link = (string) $options['invite_link'];
-            } else {
-                throw new JoinException(
-                    'Cannot determine a link for this channel. '
-                    . 'Provide a "link" option.'
-                );
-            }
-        }
+        $link = $this->resolveLink($chat, $chatId, $identifier, $options);
 
         if ($this->provider->findByChatId($chatId) !== null) {
             throw new JoinException("Channel already registered: {$title}");
@@ -98,6 +86,73 @@ class JoinManager implements JoinManagerInterface
             'max_adds'       => max(0, (int) ($options['max_adds'] ?? 0)),
             'current_adds'   => 0,
         ]);
+    }
+
+    /**
+     * Determine the URL to expose for the required channel.
+     *
+     * Resolution order:
+     *   1. Explicit "link" option.
+     *   2. Explicit "invite_link" option (kept for backwards compat).
+     *   3. The public t.me URL when the chat carries a username.
+     *   4. A freshly exported invite link obtained via the Bot API.
+     *
+     * Step 4 lets private channels be registered without the caller
+     * having to know the invite link up front; the bot is already
+     * verified to be an administrator at this point, so it is allowed
+     * to call exportChatInviteLink.
+     *
+     * @param array<string, mixed> $chat
+     * @param array<string, mixed> $options
+     */
+    private function resolveLink(array $chat, int $chatId, string $identifier, array $options): string
+    {
+        $explicit = (string) ($options['link'] ?? '');
+        if ($explicit !== '') {
+            return $explicit;
+        }
+
+        $invite = (string) ($options['invite_link'] ?? '');
+        if ($invite !== '') {
+            return $invite;
+        }
+
+        if (!empty($chat['username'])) {
+            return 'https://t.me/' . $chat['username'];
+        }
+
+        return $this->exportInviteLink($chatId, $identifier);
+    }
+
+    /**
+     * Export a permanent invite link for a private channel.
+     *
+     * @throws JoinException When the export fails or returns no link.
+     */
+    private function exportInviteLink(int $chatId, string $identifier): string
+    {
+        try {
+            $response = $this->client->exportChatInviteLink($chatId)->await();
+        } catch (\Throwable $e) {
+            throw new JoinException(
+                "Cannot determine a link for '{$identifier}'. "
+                . 'The bot must be an administrator with invite rights, '
+                . 'or the "link" option must be supplied explicitly. '
+                . 'Underlying error: ' . $e->getMessage(),
+                0,
+                $e
+            );
+        }
+
+        $link = (string) ($response['result'] ?? '');
+        if ($link === '') {
+            throw new JoinException(
+                "Cannot determine a link for '{$identifier}': "
+                . 'exportChatInviteLink returned an empty result.'
+            );
+        }
+
+        return $link;
     }
 
     public function removeChannel(int $id): bool
