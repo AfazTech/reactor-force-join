@@ -3,6 +3,7 @@
 namespace AfazTech\ReactorJoin\Middleware;
 
 use AfazTech\ReactorJoin\Contracts\ChannelProviderInterface;
+use AfazTech\ReactorJoin\Contracts\JoinManagerInterface;
 use AfazTech\ReactorJoin\Events;
 use AfazTech\ReactorJoin\Models\ChannelMember;
 use Reactor\Attributes\Middleware;
@@ -15,13 +16,15 @@ use Carbon\Carbon;
 
 /**
  * Keeps the channel_members table in sync with the Telegram chat_member
- * stream.
+ * stream, and enforces the target_members / max_adds rules on every
+ * join.
  *
  * - On chat_member: updates the local membership record of the user
- *   whose status changed (new_chat_member.user), increments the
- *   channel's join counter on transitions from not-joined to joined,
- *   and fires the MEMBER_JOINED / MEMBER_LEFT / CHANNEL_DEACTIVATED
- *   events.
+ *   whose status changed, increments the channel's join counter on
+ *   transitions from not-joined to joined, dispatches MEMBER_JOINED,
+ *   and calls JoinManagerInterface::enforceLimits() so that a channel
+ *   that just reached target_members or max_adds is deactivated
+ *   immediately — no polling, no scheduled job.
  * - On my_chat_member: deactivates the channel when the bot itself is
  *   removed from it, because membership can no longer be verified.
  *
@@ -34,6 +37,7 @@ class ChatMemberSyncMiddleware implements MiddlewareInterface
 {
     public function __construct(
         private ChannelProviderInterface $provider,
+        private JoinManagerInterface $joinManager,
         private EventDispatcher $dispatcher,
         private LoggerInterface $logger,
     ) {
@@ -98,14 +102,10 @@ class ChatMemberSyncMiddleware implements MiddlewareInterface
 
             $this->dispatcher->dispatch(Events::MEMBER_JOINED, (int) $userId, $channel->id);
 
-            if ($channel->max_adds > 0 && $channel->current_adds >= $channel->max_adds) {
-                $channel->is_active = false;
-                $channel->save();
-                $this->dispatcher->dispatch(Events::CHANNEL_DEACTIVATED, $channel->id, 'max_adds_reached');
-                $this->logger->info('Required channel deactivated (max_adds reached)', [
-                    'channel_id' => $channel->id,
-                ]);
-            }
+            // Immediate enforcement: target_members and max_adds are
+            // both evaluated here so a channel that just crossed a
+            // threshold is deactivated on this very update.
+            $this->joinManager->enforceLimits((int) $channel->id);
         } elseif (!$isJoined && $wasJoined) {
             $this->dispatcher->dispatch(Events::MEMBER_LEFT, (int) $userId, $channel->id);
         }

@@ -9,7 +9,6 @@ use AfazTech\ReactorJoin\Exceptions\ChannelNotFoundException;
 use AfazTech\ReactorJoin\Exceptions\JoinException;
 use AfazTech\ReactorJoin\Models\ChannelMember;
 use AfazTech\ReactorJoin\Models\RequiredChannel;
-use AfazTech\ReactorJoin\Support\JoinConfig;
 use Carbon\Carbon;
 use Neili\Client;
 use Neili\Exceptions\PermanentException;
@@ -28,6 +27,20 @@ use Reactor\Core\EventDispatcher;
  * calls while still allowing a user who re-joined (and whose
  * chat_member update may still be in flight) to pass the check
  * immediately.
+ *
+ * Two auto-deactivation rules are supported, both configurable through
+ * dedicated setters and both evaluated by enforceLimits():
+ *
+ *   - target_members: deactivate when the channel reaches N Telegram
+ *     members (counted by getChatMemberCount). 0 = disabled.
+ *   - max_adds:       deactivate after the bot has driven N joins to
+ *     the channel (counted by current_adds). 0 = disabled.
+ *
+ * enforceLimits() is called by ChatMemberSyncMiddleware after every
+ * join, by setChannelTargetMembers()/setChannelMaxAdds() (so admins
+ * get immediate feedback), and by addChannel() (so a channel already
+ * over a threshold is deactivated at creation time). The host
+ * application may also call it explicitly at any time.
  */
 class JoinManager implements JoinManagerInterface
 {
@@ -36,7 +49,6 @@ class JoinManager implements JoinManagerInterface
     public function __construct(
         private Client $client,
         private ChannelProviderInterface $provider,
-        private JoinConfig $config,
         private EventDispatcher $dispatcher,
         private LoggerInterface $logger,
     ) {
@@ -77,7 +89,7 @@ class JoinManager implements JoinManagerInterface
             throw new JoinException("Channel already registered: {$title}");
         }
 
-        return $this->provider->create([
+        $channel = $this->provider->create([
             'chat_id'        => $chatId,
             'title'          => $title,
             'link'           => $link,
@@ -86,6 +98,12 @@ class JoinManager implements JoinManagerInterface
             'max_adds'       => max(0, (int) ($options['max_adds'] ?? 0)),
             'current_adds'   => 0,
         ]);
+
+        // A channel that already exceeds its own target_members (or
+        // max_adds) should not remain active; evaluate immediately.
+        $this->enforceLimits((int) $channel->id);
+
+        return $channel;
     }
 
     /**
@@ -96,11 +114,6 @@ class JoinManager implements JoinManagerInterface
      *   2. Explicit "invite_link" option (kept for backwards compat).
      *   3. The public t.me URL when the chat carries a username.
      *   4. A freshly exported invite link obtained via the Bot API.
-     *
-     * Step 4 lets private channels be registered without the caller
-     * having to know the invite link up front; the bot is already
-     * verified to be an administrator at this point, so it is allowed
-     * to call exportChatInviteLink.
      *
      * @param array<string, mixed> $chat
      * @param array<string, mixed> $options
@@ -124,11 +137,6 @@ class JoinManager implements JoinManagerInterface
         return $this->exportInviteLink($chatId, $identifier);
     }
 
-    /**
-     * Export a permanent invite link for a private channel.
-     *
-     * @throws JoinException When the export fails or returns no link.
-     */
     private function exportInviteLink(int $chatId, string $identifier): string
     {
         try {
@@ -170,9 +178,120 @@ class JoinManager implements JoinManagerInterface
         return $this->provider->active();
     }
 
+    public function getChannel(int $id): ?RequiredChannel
+    {
+        return $this->provider->find($id);
+    }
+
     public function setChannelActive(int $id, bool $active): bool
     {
         return $this->provider->setActive($id, $active);
+    }
+
+    public function setChannelTargetMembers(int $channelId, int $target): bool
+    {
+        $channel = $this->provider->find($channelId);
+        if ($channel === null) {
+            return false;
+        }
+
+        $channel->target_members = max(0, $target);
+        $channel->save();
+
+        // Immediate feedback: if the channel already meets or exceeds
+        // the new target, deactivate it now instead of waiting for the
+        // next chat_member event (which may never arrive for an idle
+        // channel).
+        $this->enforceLimits($channelId);
+
+        return true;
+    }
+
+    public function setChannelMaxAdds(int $channelId, int $max): bool
+    {
+        $channel = $this->provider->find($channelId);
+        if ($channel === null) {
+            return false;
+        }
+
+        $channel->max_adds = max(0, $max);
+        $channel->save();
+
+        $this->enforceLimits($channelId);
+
+        return true;
+    }
+
+    public function resetChannelCurrentAdds(int $channelId): bool
+    {
+        $channel = $this->provider->find($channelId);
+        if ($channel === null) {
+            return false;
+        }
+
+        $channel->current_adds = 0;
+        $channel->save();
+
+        return true;
+    }
+
+    public function enforceLimits(int $channelId): bool
+    {
+        $channel = $this->provider->find($channelId);
+        if ($channel === null || !$channel->is_active) {
+            return false;
+        }
+
+        // Rule 1: target_members (Telegram member count).
+        if ((int) $channel->target_members > 0) {
+            try {
+                $response = $this->client->getChatMemberCount($channel->chat_id)->await();
+                $count = (int) ($response['result'] ?? 0);
+            } catch (\Throwable $e) {
+                $this->logger->warning('getChatMemberCount failed during limit check', [
+                    'channel_id' => $channel->id,
+                    'error'      => $e->getMessage(),
+                ]);
+                $count = -1;
+            }
+
+            if ($count >= 0 && $count >= (int) $channel->target_members) {
+                $channel->is_active = false;
+                $channel->save();
+                $this->dispatcher->dispatch(
+                    Events::CHANNEL_DEACTIVATED,
+                    $channel->id,
+                    'target_members_reached'
+                );
+                $this->logger->info('Required channel deactivated (target_members reached)', [
+                    'channel_id' => $channel->id,
+                    'count'      => $count,
+                    'target'     => (int) $channel->target_members,
+                ]);
+                return true;
+            }
+        }
+
+        // Rule 2: max_adds (joins driven by the bot).
+        if ((int) $channel->max_adds > 0
+            && (int) $channel->current_adds >= (int) $channel->max_adds
+        ) {
+            $channel->is_active = false;
+            $channel->save();
+            $this->dispatcher->dispatch(
+                Events::CHANNEL_DEACTIVATED,
+                $channel->id,
+                'max_adds_reached'
+            );
+            $this->logger->info('Required channel deactivated (max_adds reached)', [
+                'channel_id'   => $channel->id,
+                'current_adds' => (int) $channel->current_adds,
+                'max_adds'     => (int) $channel->max_adds,
+            ]);
+            return true;
+        }
+
+        return false;
     }
 
     public function missingChannels(int $userId): array
@@ -220,9 +339,7 @@ class JoinManager implements JoinManagerInterface
         }
 
         // Slow path: either we have no record yet, or the record says
-        // the user is not a member. Call the API once to confirm and
-        // catch the case where the user re-joined and the chat_member
-        // update has not been delivered yet.
+        // the user is not a member. Call the API once to confirm.
         try {
             $response = $this->client->getChatMember($channel->chat_id, $userId)->await();
         } catch (PermanentException $e) {
@@ -235,8 +352,6 @@ class JoinManager implements JoinManagerInterface
                 return null;
             }
 
-            // Any other permanent error (user not found, etc.) is
-            // treated as "not a member".
             $this->persistRecord($userId, $channel->id, false);
             return false;
         } catch (\Throwable $e) {
@@ -301,11 +416,7 @@ class JoinManager implements JoinManagerInterface
 
         $this->dispatcher->dispatch(Events::MEMBER_JOINED, $userId, $channel->id);
 
-        if ($channel->max_adds > 0 && $channel->current_adds >= $channel->max_adds) {
-            $channel->is_active = false;
-            $channel->save();
-            $this->dispatcher->dispatch(Events::CHANNEL_DEACTIVATED, $channel->id, 'max_adds_reached');
-        }
+        $this->enforceLimits((int) $channel->id);
     }
 
     private function deactivateChannel(RequiredChannel $channel, string $reason): void

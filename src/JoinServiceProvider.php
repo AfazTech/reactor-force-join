@@ -5,7 +5,6 @@ namespace AfazTech\ReactorJoin;
 use AfazTech\ReactorJoin\Contracts\ChannelProviderInterface;
 use AfazTech\ReactorJoin\Contracts\JoinManagerInterface;
 use AfazTech\ReactorJoin\Support\DatabaseChannelProvider;
-use AfazTech\ReactorJoin\Support\JoinConfig;
 use Reactor\Contracts\ServiceProviderInterface;
 use Reactor\Core\Container;
 use Reactor\Enums\MiddlewareMode;
@@ -13,56 +12,60 @@ use Reactor\Enums\MiddlewareMode;
 /**
  * Registers join package services and wires the package's middleware.
  *
- * Config binding is provided as an empty default. The host application
- * overrides JoinConfig in its own service provider to customise the
- * message keys, exemptions and admin list.
+ * This package is API-only for enforcement: it exposes
+ * JoinManagerInterface (addChannel, removeChannel, setChannelActive,
+ * setChannelTargetMembers, setChannelMaxAdds, enforceLimits,
+ * missingChannels, isMember, ...) and does NOT install any middleware
+ * that blocks users.
  *
- * This package ships no handler and no language files: it exposes the
- * JoinManagerInterface API and the two middlewares that implement the
- * core logic (ChatMemberSyncMiddleware for Telegram state, and
- * ForceJoinMiddleware for enforcement).
+ * The single middleware that ships with the package,
+ * ChatMemberSyncMiddleware, exists to keep the local channel_members
+ * cache fresh: it listens to Telegram's chat_member / my_chat_member
+ * updates and, on every join, calls JoinManagerInterface::enforceLimits()
+ * so that the target_members and max_adds thresholds are evaluated on
+ * every change instead of on a schedule. Removing it would make the
+ * local cache stale — a user who left a required channel would
+ * continue to pass missingChannels() because the DB still says
+ * is_joined = true — so this middleware is core to the package's
+ * correctness, not a policy.
  *
- * IMPORTANT — join:check callback:
- *   ForceJoinMiddleware sends a "join:check" callback button in its
- *   prompt. Because this package no longer ships a handler, the host
- *   application MUST implement one, e.g.:
+ * Enforcement is the host application's job. A minimal middleware that
+ * blocks users who have not joined the required channels:
  *
- *     #[Callback(data: 'join:check', priority: 200)]
- *     #[OnUpdate('callback_query')]
- *     class JoinCheckHandler extends BaseHandler
+ *     #[Middleware(priority: 30, mode: MiddlewareMode::GLOBAL)]
+ *     #[OnUpdate('message,callback_query')]
+ *     class MyForceJoinMiddleware implements MiddlewareInterface
  *     {
  *         public function __construct(
- *             Client $client,
- *             LanguageInterface $language,
- *             LoggerInterface $logger,
- *             UserRepositoryInterface $users,
  *             private JoinManagerInterface $joinManager,
- *         ) {
- *             parent::__construct($client, $language, $logger, $users);
- *         }
+ *             private \Neili\Client $client,
+ *         ) {}
  *
- *         protected function handle(array $params = []): void
+ *         public function handle(array $update): bool
  *         {
- *             $userId = $this->getUserId();
- *             $missing = $this->joinManager->missingChannels($userId);
- *             // Show success or re-render the prompt yourself.
+ *             $userId = $update['message']['from']['id']
+ *                 ?? $update['callback_query']['from']['id']
+ *                 ?? null;
+ *             if ($userId === null) {
+ *                 return false;
+ *             }
+ *
+ *             $missing = $this->joinManager->missingChannels((int) $userId);
+ *             if ($missing === []) {
+ *                 return false;
+ *             }
+ *
+ *             // Build and send your own prompt, keyboard, callback
+ *             // handler — this package does not ship any of it.
+ *             // ... $this->client->sendMessage(...);
+ *             return true;
  *         }
  *     }
- *
- *   Alternatively, remove ForceJoinMiddleware from the registration
- *   list below and enforce channel membership from your own middleware
- *   (using JoinManagerInterface::missingChannels()).
  */
 class JoinServiceProvider implements ServiceProviderInterface
 {
     public function register(Container $container): void
     {
-        if (!$container->has(JoinConfig::class)) {
-            $container->singleton(JoinConfig::class, function () {
-                return new JoinConfig();
-            });
-        }
-
         if (!$container->has(ChannelProviderInterface::class)) {
             $container->singleton(ChannelProviderInterface::class, function () {
                 return new DatabaseChannelProvider();
@@ -74,7 +77,6 @@ class JoinServiceProvider implements ServiceProviderInterface
                 return new JoinManager(
                     $c->get(\Neili\Client::class),
                     $c->get(ChannelProviderInterface::class),
-                    $c->get(JoinConfig::class),
                     $c->get(\Reactor\Core\EventDispatcher::class),
                     $c->get(\Reactor\Contracts\LoggerInterface::class),
                 );
@@ -98,13 +100,6 @@ class JoinServiceProvider implements ServiceProviderInterface
                 'mode'           => MiddlewareMode::GLOBAL,
                 'groups'         => [],
                 'allowedUpdates' => ['chat_member', 'my_chat_member'],
-            ],
-            [
-                'class'          => \AfazTech\ReactorJoin\Middleware\ForceJoinMiddleware::class,
-                'priority'       => 30,
-                'mode'           => MiddlewareMode::GLOBAL,
-                'groups'         => [],
-                'allowedUpdates' => ['message', 'callback_query'],
             ],
         ];
 
