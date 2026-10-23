@@ -8,16 +8,50 @@ use AfazTech\ReactorJoin\Support\DatabaseChannelProvider;
 use AfazTech\ReactorJoin\Support\JoinConfig;
 use Reactor\Contracts\ServiceProviderInterface;
 use Reactor\Core\Container;
-use Reactor\Core\Router;
 use Reactor\Enums\MiddlewareMode;
 
 /**
- * Registers join package services and wires the discovery of the
- * package's handlers and middleware.
+ * Registers join package services and wires the package's middleware.
  *
  * Config binding is provided as an empty default. The host application
  * overrides JoinConfig in its own service provider to customise the
- * message keys, cache TTLs, exemptions and admin list.
+ * message keys, exemptions and admin list.
+ *
+ * This package ships no handler and no language files: it exposes the
+ * JoinManagerInterface API and the two middlewares that implement the
+ * core logic (ChatMemberSyncMiddleware for Telegram state, and
+ * ForceJoinMiddleware for enforcement).
+ *
+ * IMPORTANT — join:check callback:
+ *   ForceJoinMiddleware sends a "join:check" callback button in its
+ *   prompt. Because this package no longer ships a handler, the host
+ *   application MUST implement one, e.g.:
+ *
+ *     #[Callback(data: 'join:check', priority: 200)]
+ *     #[OnUpdate('callback_query')]
+ *     class JoinCheckHandler extends BaseHandler
+ *     {
+ *         public function __construct(
+ *             Client $client,
+ *             LanguageInterface $language,
+ *             LoggerInterface $logger,
+ *             UserRepositoryInterface $users,
+ *             private JoinManagerInterface $joinManager,
+ *         ) {
+ *             parent::__construct($client, $language, $logger, $users);
+ *         }
+ *
+ *         protected function handle(array $params = []): void
+ *         {
+ *             $userId = $this->getUserId();
+ *             $missing = $this->joinManager->missingChannels($userId);
+ *             // Show success or re-render the prompt yourself.
+ *         }
+ *     }
+ *
+ *   Alternatively, remove ForceJoinMiddleware from the registration
+ *   list below and enforce channel membership from your own middleware
+ *   (using JoinManagerInterface::missingChannels()).
  */
 class JoinServiceProvider implements ServiceProviderInterface
 {
@@ -50,16 +84,6 @@ class JoinServiceProvider implements ServiceProviderInterface
 
     public function boot(Container $container): void
     {
-        // Discover the package's handlers so the JoinCheckCallbackHandler
-        // is available without the host having to register it manually.
-        if ($container->has(Router::class)) {
-            $router = $container->get(Router::class);
-            $router->discover(__DIR__ . '/Handlers', 'AfazTech\\ReactorJoin\\Handlers');
-        }
-
-        // Inject the package's middleware into the framework's middleware
-        // list. The App constructor reads the 'middlewares' binding after
-        // running providers, so replacing the binding here is safe.
         $this->registerMiddleware($container);
     }
 
