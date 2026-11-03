@@ -1,6 +1,6 @@
 # Reactor Force Join
 
-[![PHP Version](https://img.shields.io/badge/php-%3E%3D8.1-blue.svg)](https://www.php.net/)
+[![PHP Version](https://img.shields.io/badge/php-%3E%3D8.4-blue.svg)](https://www.php.net/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Reactor](https://img.shields.io/badge/Reactor-Framework-orange.svg)](https://github.com/afaztech/reactor)
 
@@ -20,7 +20,7 @@ Required channel management for [Reactor](https://github.com/afaztech/reactor) T
 
 ## Requirements
 
-- `afaztech/reactor-framework` ^0.5.0
+- `afaztech/reactor-framework` ^0.9.0
 
 ## Installation
 

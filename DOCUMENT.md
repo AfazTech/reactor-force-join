@@ -44,8 +44,8 @@ The package **does not block users**. Blocking (force-join enforcement) is the h
 
 ## Requirements
 
-- PHP >= 8.1
-- `afaztech/reactor-framework` ^0.5.0
+- PHP >= 8.4
+- `afaztech/reactor-framework` ^0.9.0
 
 The framework provides `Neili\Client`, `DatabaseManagerInterface`, and `LoggerInterface`.
 
